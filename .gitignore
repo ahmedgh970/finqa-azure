@@ -1,0 +1,29 @@
+.venv/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+reports/
+*.[pP][dD][fF]
+.coverage
+htmlcov/
+
+# Local documentation, reports and Azure configuration exports.
+/docs/
+
+# Agent instructions, local plans and milestone notes.
+[Aa][Gg][Ee][Nn][Tt][Ss].md
+[Pp][Ll][Aa][Nn].md
+[Pp][Ll][Aa][Nn]-*.md
+[Pp][Ll][Aa][Nn]_*.md
+[Mm][Ii][Ll][Ee][Ss][Tt][Oo][Nn][Ee]*.md
+.agents/
+.codex/
+.aws/
