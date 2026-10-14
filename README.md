@@ -65,6 +65,81 @@ uv run python -m ai103.pdf_page_inventory /chemin/vers/corpus --expected-count 8
 Le compteur parcourt les PDF locaux en lecture seule et enregistre les pages par fichier,
 les erreurs et le total dans un rapport JSON. Un corpus incomplet n'est pas déclaré complet.
 
+## Métadonnées documentaires
+
+Configurer `AZURE_SEARCH_SERVICE_ENDPOINT` dans `.env` et préparer un référentiel JSONL
+avec les champs `doc_name`, `company` et `fiscal_year` (entier ou `null`). Le nom documentaire
+correspond au nom du PDF sans son extension, en conservant sa casse.
+
+Préparer les mises à jour sans écrire dans Azure :
+
+```bash
+uv run python -m ai103.metadata_enrichment --dry-run
+```
+
+Le client vérifie le schéma et la couverture complète des documents dans les deux index,
+puis enregistre un bilan dans `docs/reports/metadata-enrichment.json`.
+Le référentiel par défaut est `docs/corpus-metadata.jsonl`, avec 84 documents attendus.
+`--metadata`, `--expected-count`, `--endpoint`, `--report` et `--index` permettent de configurer
+le traitement ; `--index` peut être répété pour sélectionner plusieurs index.
+
+Appliquer les métadonnées après examen du bilan :
+
+```bash
+uv run python -m ai103.metadata_enrichment --apply
+```
+
+Les mises à jour utilisent uniquement `merge` avec `chunk_id`, `company` et `fiscal_year`.
+Le contenu, les pages, les sources et les vecteurs ne sont pas envoyés. Aucun indexer,
+appel Layout ou calcul d'embeddings n'est déclenché. Les champs vectoriels doivent être stockés
+avec `stored=true`. La vérification relit toutes les clés connues par lots filtrés avec
+`search.in`, sans pagination par position : les merge peuvent changer l'ordre des résultats.
+Elle réessaie brièvement les lectures si les mises à jour ne sont pas encore visibles.
+Les envois sont séquentiels, avec une seconde entre lots. Un HTTP 429 sans indication
+explicite de quota déclenche au plus quatre reprises du même lot avec attente croissante,
+en respectant `Retry-After`. Un quota signalé ou une attente demandée supérieure à 60 secondes
+arrête le traitement. Les erreurs individuelles d'un lot entraînent également un arrêt.
+`--batch-size 100` réduit la taille des lots (500 par défaut).
+Les lectures et écritures consomment les ressources du service Search existant.
+
+Le traitement n'est pas une transaction globale : un échec peut laisser des mises à jour partielles.
+Le rapport indique les opérations acquittées ; une nouvelle simulation identifie les chunks encore
+à modifier. Les chunks déjà conformes sont ignorés.
+La lecture initiale exige un index sans ingestion concurrente et s'arrête si elle détecte
+des clés répétées ou un changement de comptage. Une reprise utilise la même commande `--apply` ;
+aucun Reset ni lancement d'indexer n'est nécessaire. Utiliser `--report` avec un autre chemin
+pour conserver le rapport précédent pendant un diagnostic en simulation.
+
+## Localisation des pages
+
+Un export en lecture seule permet de préparer les pages physiques des chunks existants :
+
+```bash
+uv run python -m ai103.chunk_snapshot --endpoint https://your-search-service.search.windows.net
+uv run python -m ai103.page_localization
+uv run python -m ai103.page_localization_validation
+```
+
+La localisation utilise les PDF originaux locaux et `pdftotext` (Poppler requis).
+Les sauts de page sont conservés ; la numérotation commence à 1, couverture comprise.
+Les propositions `chunk_id`, `page_start`, `page_end` et leurs audits sont enregistrés sous
+`docs/reports/page-localization/`. Les passages ambigus restent à `null`.
+Les scores d'alignement ne garantissent pas l'exactitude de chaque proposition.
+Ces commandes ne modifient aucun index Azure et ne déclenchent pas d'analyse documentaire.
+
+Après examen des propositions, le client de pages vérifie leur provenance et prépare les merge :
+
+```bash
+uv run python -m ai103.page_enrichment --dry-run --endpoint https://your-search-service.search.windows.net
+```
+
+`--apply` autorise explicitement leur application, par lots de 100. Seuls `chunk_id`,
+`page_start` et `page_end` sont envoyés. Les propositions non résolues sont ignorées ;
+une page existante contradictoire ou un contenu modifié provoque un arrêt. Le client relit
+les deux index avant toute écriture, recontrôle chaque lot et vérifie les pages ainsi que
+le contenu, la source et les métadonnées préservées après application. Le rapport se trouve
+dans `docs/reports/page-localization/enrichment.json`.
+
 ## Vérifications
 
 ```bash
