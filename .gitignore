@@ -19,11 +19,13 @@ htmlcov/
 /docs/
 
 # Agent instructions, local plans and milestone notes.
-[Aa][Gg][Ee][Nn][Tt][Ss].md
+[Cc][Ll][Aa][Uu][Dd][Ee].md
+.claude/
 [Pp][Ll][Aa][Nn].md
 [Pp][Ll][Aa][Nn]-*.md
 [Pp][Ll][Aa][Nn]_*.md
 [Mm][Ii][Ll][Ee][Ss][Tt][Oo][Nn][Ee]*.md
-.agents/
-.codex/
 .aws/
+
+# Clone local des labs Microsoft Learn.
+mslearn-ai-studio/
