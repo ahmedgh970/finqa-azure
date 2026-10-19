@@ -2,6 +2,7 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
+from azure.core.credentials import AccessToken
 
 from ai103.retriever import AzureEmbedder, Chunk, Mode, Retriever, Runner
 from ai103.retriever.evaluation import compare, load_question
@@ -70,12 +71,21 @@ def test_embedding_request():
             200, json={"data": [{"embedding": VECTOR}], "usage": {"total_tokens": 2}}
         )
 
-    credential = Mock()
-    credential.get_token.return_value.token = "fake-token"
+    class Credential:
+        calls = 0
+
+        def get_token(self, *scopes, **kwargs):
+            self.calls += 1
+            return AccessToken("fake-token", 9_999_999_999)
+
+    credential = Credential()
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         embed = AzureEmbedder(client, credential, "https://example.openai.azure.com", "deployed")
         assert embed("question") == VECTOR
+        assert embed("question") == VECTOR
         assert embed.last_usage["total_tokens"] == 2
+    # Jeton mis en cache : un seul appel à l'identité pour deux embeddings.
+    assert credential.calls == 1
 
 
 def test_evidence_diagnostic_requires_correct_document():
