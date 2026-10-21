@@ -93,9 +93,17 @@ def add_pipeline_arguments(parser: argparse.ArgumentParser) -> None:
         default=Strategy.COMPANY_YEAR_TOLERANT,
     )
     parser.add_argument("--k", type=int, default=5)
+    parser.add_argument(
+        "--pool", type=int, help="semantic_hybrid : reclasser seulement les N premiers hybrides."
+    )
     parser.add_argument("--effort", default="low", choices=["none", "minimal", "low", "medium"])
     parser.add_argument("--metadata", type=Path, default=Path("docs/corpus-metadata.jsonl"))
     parser.add_argument("--trace", type=Path, help="Ajouter les spans OpenTelemetry à ce JSONL.")
+    parser.add_argument(
+        "--semantic-configuration",
+        help="Configuration sémantique de l'index (mode semantic_hybrid). Par défaut : "
+        "AZURE_SEARCH_SEMANTIC_CONFIGURATION, sinon finance-semantic.",
+    )
 
 
 def check_environment(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
@@ -104,6 +112,10 @@ def check_environment(parser: argparse.ArgumentParser, args: argparse.Namespace)
     load_dotenv()
     if missing := [name for name in REQUIRED if not os.environ.get(name, "").strip()]:
         parser.error(f"Configurer dans .env : {', '.join(missing)}")
+    # Résolu après load_dotenv : la valeur de .env doit être visible.
+    args.semantic_configuration = args.semantic_configuration or os.environ.get(
+        "AZURE_SEARCH_SEMANTIC_CONFIGURATION", "finance-semantic"
+    )
 
 
 def pipeline_settings(args: argparse.Namespace) -> dict[str, Any]:
@@ -112,8 +124,12 @@ def pipeline_settings(args: argparse.Namespace) -> dict[str, Any]:
         "mode": args.mode.value,
         "filter_strategy": args.filter_strategy.value,
         "k": args.k,
+        "pool": args.pool,
         "reasoning_effort": args.effort,
         "deployment": os.environ["AZURE_OPENAI_CHAT_DEPLOYMENT"],
+        "semantic_configuration": (
+            args.semantic_configuration if args.mode is Mode.SEMANTIC_HYBRID else None
+        ),
     }
 
 
@@ -148,8 +164,15 @@ def build_pipeline(
     generator = AzureGenerator(
         client, os.environ["AZURE_OPENAI_CHAT_DEPLOYMENT"], reasoning_effort=args.effort
     )
+    retriever = Retriever(search, semantic_configuration=args.semantic_configuration)
     pipeline = RagPipeline(
-        Retriever(search), embedder, generator, filter_for=filter_for, mode=args.mode, k=args.k
+        retriever,
+        embedder,
+        generator,
+        filter_for=filter_for,
+        mode=args.mode,
+        k=args.k,
+        pool=args.pool,
     )
     return pipeline, credential
 

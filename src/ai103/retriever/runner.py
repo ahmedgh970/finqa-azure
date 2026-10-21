@@ -15,7 +15,7 @@ from azure.identity import DefaultAzureCredential
 from azure.search.documents import SearchClient
 from dotenv import load_dotenv
 
-from ai103.retriever.core import AzureEmbedder, Mode, Retriever, Runner
+from ai103.retriever.core import BENCHMARK_MODES, AzureEmbedder, Mode, Retriever, Runner
 from ai103.retriever.evaluation import compare, load_question
 
 
@@ -31,7 +31,9 @@ def main() -> None:
             "financial-chunks-layout-v1",
         ],
     )
-    parser.add_argument("--modes", nargs="+", choices=list(Mode), default=list(Mode))
+    parser.add_argument(
+        "--modes", nargs="+", type=Mode, choices=BENCHMARK_MODES, default=list(BENCHMARK_MODES)
+    )
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument("--candidates", type=int, default=50)
     parser.add_argument(

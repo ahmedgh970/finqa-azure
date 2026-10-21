@@ -2,7 +2,7 @@
 
 import math
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
 
@@ -20,6 +20,11 @@ class Mode(StrEnum):
     LEXICAL = "lexical"
     VECTOR = "vector"
     HYBRID = "hybrid"
+    # Hybride puis reclassement des 50 premiers par le semantic ranker d'Azure AI Search.
+    SEMANTIC_HYBRID = "semantic_hybrid"
+
+
+BENCHMARK_MODES = (Mode.LEXICAL, Mode.VECTOR, Mode.HYBRID)
 
 
 @dataclass(frozen=True)
@@ -32,6 +37,10 @@ class Chunk:
     fiscal_year: int | None = None
     page_start: int | None = None
     page_end: int | None = None
+    # Score du semantic ranker (0 à 4), présent seulement en mode sémantique.
+    reranker_score: float | None = None
+    # Rang (1 = premier) dans le lot hybride avant reclassement, si un lot est imposé.
+    initial_rank: int | None = None
 
 
 def validate_vector(vector: Sequence[float]) -> list[float]:
@@ -77,8 +86,9 @@ class AzureEmbedder:
 
 
 class Retriever:
-    def __init__(self, client: SearchClient) -> None:
+    def __init__(self, client: SearchClient, semantic_configuration: str | None = None) -> None:
         self.client = client
+        self.semantic_configuration = semantic_configuration
 
     def retrieve(
         self,
@@ -89,8 +99,39 @@ class Retriever:
         vector: Sequence[float] | None = None,
         candidates: int = 50,
         filter_expression: str | None = None,
+        pool: int | None = None,
     ) -> list[Chunk]:
+        """`pool` : nombre de candidats hybrides que le semantic ranker peut reclasser.
+
+        Sans `pool`, Azure reclasse les 50 premiers résultats. Avec `pool`, une première
+        requête hybride fixe le lot, puis la requête sémantique est filtrée sur ces chunks :
+        on compare ainsi le reclassement et l'ordre RRF sur exactement les mêmes candidats.
+        """
         mode = Mode(mode)
+        if pool is not None:
+            if mode is not Mode.SEMANTIC_HYBRID or not k <= pool <= 50:
+                raise ValueError("pool réservé au mode semantic_hybrid, avec k <= pool <= 50.")
+            first = self.retrieve(
+                question,
+                mode=Mode.HYBRID,
+                k=pool,
+                vector=vector,
+                candidates=max(candidates, pool),
+                filter_expression=filter_expression,
+            )
+            if not first:
+                return []
+            ranks = {chunk.chunk_id: rank for rank, chunk in enumerate(first, 1)}
+            ids = ",".join(ranks)
+            reranked = self.retrieve(
+                question,
+                mode=Mode.SEMANTIC_HYBRID,
+                k=k,
+                vector=vector,
+                candidates=max(candidates, pool),
+                filter_expression=f"search.in(chunk_id, '{ids}', ',')",
+            )
+            return [replace(chunk, initial_rank=ranks.get(chunk.chunk_id)) for chunk in reranked]
         if not question.strip() or not 1 <= k <= 1000 or not k <= candidates <= 1000:
             raise ValueError("Question non vide et 1 <= k <= candidates <= 1000 requis.")
         options: dict[str, Any] = {
@@ -98,7 +139,16 @@ class Retriever:
             "select": FIELDS,
             "filter": filter_expression,
         }
-        if mode != Mode.VECTOR:
+        if mode is Mode.SEMANTIC_HYBRID:
+            if not self.semantic_configuration:
+                raise ValueError("Configuration sémantique de l'index requise.")
+            # Le ranker ne reclasse que les 50 premiers résultats de la fusion RRF.
+            options.update(
+                search_fields=["content"],
+                query_type="semantic",
+                semantic_configuration_name=self.semantic_configuration,
+            )
+        elif mode != Mode.VECTOR:
             options.update(search_fields=["content"], query_type="simple")
         if mode != Mode.LEXICAL:
             if vector is None:
@@ -124,6 +174,7 @@ class Retriever:
                 fiscal_year=row.get("fiscal_year"),
                 page_start=row.get("page_start"),
                 page_end=row.get("page_end"),
+                reranker_score=row.get("@search.reranker_score"),
             )
             for row in rows
         ]
@@ -138,7 +189,7 @@ class Runner:
         self,
         question: str,
         *,
-        modes: Sequence[Mode] = tuple(Mode),
+        modes: Sequence[Mode] = BENCHMARK_MODES,
         k: int = 5,
         candidates: int = 50,
         filter_expression: str | None = None,

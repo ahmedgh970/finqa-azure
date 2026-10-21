@@ -5,12 +5,13 @@ import pytest
 from azure.core.credentials import AccessToken
 
 from ai103.retriever import AzureEmbedder, Chunk, Mode, Retriever, Runner
+from ai103.retriever.core import BENCHMARK_MODES
 from ai103.retriever.evaluation import compare, load_question
 
 VECTOR = [0.1] * 1024
 
 
-@pytest.mark.parametrize("mode", list(Mode))
+@pytest.mark.parametrize("mode", BENCHMARK_MODES)
 def test_query_modes(mode):
     client = Mock()
     client.search.return_value = [
@@ -30,6 +31,37 @@ def test_query_modes(mode):
         assert options["vector_queries"][0].k_nearest_neighbors == 50
         assert options["vector_queries"][0].fields == "content_vector"
     assert chunks[0].page_start is None
+    assert options["query_type"] == "simple" if mode != Mode.VECTOR else "query_type" not in options
+
+
+def test_semantic_hybrid_reranks_with_index_configuration():
+    client = Mock()
+    client.search.return_value = [
+        {
+            "chunk_id": "a",
+            "content": "cash flow",
+            "source": "s",
+            "@search.score": 0.03,
+            "@search.reranker_score": 2.7,
+        }
+    ]
+    retriever = Retriever(client, semantic_configuration="finance-semantic")
+    chunks = retriever.retrieve("cash", mode=Mode.SEMANTIC_HYBRID, vector=VECTOR, k=10)
+    options = client.search.call_args.kwargs
+    assert options["query_type"] == "semantic"
+    assert options["semantic_configuration_name"] == "finance-semantic"
+    assert options["search_text"] == "cash" and "vector_queries" in options
+    assert chunks[0].reranker_score == 2.7 and chunks[0].score == 0.03
+    with pytest.raises(ValueError):
+        Retriever(client).retrieve("cash", mode=Mode.SEMANTIC_HYBRID, vector=VECTOR)
+
+
+def test_default_runner_modes_exclude_semantic():
+    embed = Mock(return_value=VECTOR)
+    retriever = Mock()
+    retriever.retrieve.return_value = []
+    result = Runner({"index": retriever}, embed).run("cash")
+    assert set(result["index"]) == {"lexical", "vector", "hybrid"}
 
 
 def test_reuses_embedding_across_indexes_and_modes():
@@ -106,3 +138,47 @@ def test_unknown_question(tmp_path):
     path.write_text('{"financebench_id":"a"}\n')
     with pytest.raises(ValueError):
         load_question(path, "missing")
+
+
+def test_semantic_rerank_of_a_fixed_hybrid_pool():
+    client = Mock()
+    pool_rows = [
+        {"chunk_id": f"c{i}", "content": "x", "source": "s", "@search.score": 1 / i}
+        for i in range(1, 21)
+    ]
+    reranked = [
+        {
+            "chunk_id": cid,
+            "content": "x",
+            "source": "s",
+            "@search.score": 0.1,
+            "@search.reranker_score": score,
+        }
+        for cid, score in (("c15", 3.1), ("c2", 2.9), ("c1", 2.0))
+    ]
+    client.search.side_effect = [pool_rows, reranked]
+    retriever = Retriever(client, semantic_configuration="finance-semantic")
+    chunks = retriever.retrieve(
+        "net PP&E",
+        mode=Mode.SEMANTIC_HYBRID,
+        vector=VECTOR,
+        k=3,
+        pool=20,
+        filter_expression="company eq '3M'",
+    )
+    first, second = (call.kwargs for call in client.search.call_args_list)
+    assert first["query_type"] == "simple" and first["top"] == 20
+    assert first["filter"] == "company eq '3M'"
+    assert second["query_type"] == "semantic" and second["top"] == 3
+    assert second["filter"].startswith("search.in(chunk_id, 'c1,c2,c3,")
+    assert second["filter"].endswith("c20', ',')")
+    # Le passage reclassé premier venait de la 15e place du lot hybride.
+    assert [(c.chunk_id, c.initial_rank) for c in chunks] == [("c15", 15), ("c2", 2), ("c1", 1)]
+
+
+def test_pool_is_only_for_semantic_mode_and_bounded():
+    retriever = Retriever(Mock(), semantic_configuration="finance-semantic")
+    with pytest.raises(ValueError):
+        retriever.retrieve("x", mode=Mode.HYBRID, vector=VECTOR, k=10, pool=20)
+    with pytest.raises(ValueError):
+        retriever.retrieve("x", mode=Mode.SEMANTIC_HYBRID, vector=VECTOR, k=10, pool=5)

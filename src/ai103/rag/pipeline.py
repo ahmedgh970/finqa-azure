@@ -50,6 +50,7 @@ class RagPipeline:
         mode: Mode = Mode.VECTOR,
         k: int = 5,
         candidates: int = 50,
+        pool: int | None = None,
     ) -> None:
         if not 1 <= k <= candidates:
             raise ValueError("1 <= k <= candidates requis.")
@@ -60,6 +61,7 @@ class RagPipeline:
         self.mode = Mode(mode)
         self.k = k
         self.candidates = candidates
+        self.pool = pool
 
     def answer(self, question: str, extra_chunks: Sequence[Chunk] = ()) -> RagResult:
         """`extra_chunks` sert uniquement aux tests de robustesse (injection simulée)."""
@@ -84,6 +86,7 @@ class RagPipeline:
                     vector=vector,
                     candidates=self.candidates,
                     filter_expression=expression,
+                    pool=self.pool,
                 )
             sources = number_sources([*chunks, *extra_chunks])
             root.set_attribute("ai103.sources", len(sources))
