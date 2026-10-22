@@ -29,3 +29,6 @@ htmlcov/
 
 # Clone local des labs Microsoft Learn.
 mslearn-ai-studio/
+
+# Rapports de campagnes (exemples du README).
+runs/
