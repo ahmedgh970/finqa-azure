@@ -62,3 +62,8 @@ réponse finale est en JSON strict et passe par les mêmes contrôles qu'à l'AD
   87 questions, 4,2 tours en moyenne, aucun appel refusé, 5 arrêts sur limite.
 - Le cache de prompt couvre 1,6 million des 4,1 millions de tokens d'entrée, ce qui limite le coût
   des tours successifs.
+- Évaluateurs d'agents d'Azure AI Evaluation, sur les conversations reconstruites depuis le journal
+  de campagne : Tool Call Accuracy **4,66** (94 % ≥ 3), Intent Resolution **4,81** (96 %), Task
+  Adherence **84 %**. Les échecs de Task Adherence sont surtout de forme (marqueurs de citation
+  absents, extraits trop longs) : hors arrêts sur limite, ces réponses ont la même completeness
+  que les autres. Task Adherence mesure le respect des consignes, pas l'exactitude.

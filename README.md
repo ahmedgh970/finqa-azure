@@ -21,6 +21,8 @@ statistiques appariés. Les décisions et leurs preuves sont consignées dans le
 - **L'agent répond à 91 % des questions contre 69 % pour le meilleur RAG, sans perdre en
   précision** : 46 chiffres exacts sur 48 donnés. Gain significatif sur la completeness
   (+0,56, IC 95 % [+0,31 ; +0,83]) et sur les chiffres (+10 / −1, McNemar p = 0,012).
+- **La trajectoire de l'agent est jugée bonne** par les évaluateurs d'agents : Tool Call Accuracy
+  4,66 sur 5, Intent Resolution 4,81 sur 5, Task Adherence 84 % (échecs surtout de forme).
 - **Le semantic ranker améliore la réponse à lot de candidats égal** : +0,32 de completeness,
   IC 95 % [+0,15 ; +0,51] ([ADR-0003](adr/0003-hybride-semantic-ranker.md)).
 - **Les filtres extraits de la question** font passer la recherche lexicale de 49 % à 92 % de bons
@@ -117,6 +119,9 @@ uv run python scripts/agent_monitor.py --run runs/agent
 uv run python scripts/evaluate_rag.py --run runs/C5
 uv run python scripts/evaluate_rag.py --run runs/agent
 uv run python scripts/compare_rag_configs.py runs/C5 runs/agent --output runs/comparison.json
+
+# Évaluateurs d'agents (Tool Call Accuracy, Task Adherence, Intent Resolution)
+uv run python scripts/evaluate_agent.py --run runs/agent
 ```
 
 Les commandes qui écrivent dans Azure sont en simulation par défaut et demandent `--apply`.

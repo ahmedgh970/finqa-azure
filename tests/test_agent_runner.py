@@ -84,6 +84,7 @@ def test_tool_loop_then_verified_final_answer():
     )
     assert result.usage.input_tokens == 2000
     client.conversations.delete.assert_called_once_with("conv_1")
+    assert result.tool_calls[0].sources == [1]
     record = agent_record(result, {"agent": AGENT_NAME})
     assert record["sources"][0]["verified"] and record["tool_calls"][0]["executed"]
     assert record["cost_usd"] == pytest.approx(result.usage.cost_usd)

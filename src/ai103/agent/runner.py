@@ -35,6 +35,8 @@ class ToolCall:
     seconds: float
     executed: bool
     summary: str
+    # Numéros des passages renvoyés par cet appel (recherche), pour l'évaluation de trajectoire.
+    sources: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -182,6 +184,7 @@ class AgentRunner:
                 perf_counter() - started,
                 executed,
                 _summary(output),
+                [passage["source"] for passage in json.loads(output).get("passages", [])],
             )
         )
         return {"type": "function_call_output", "call_id": call.call_id, "output": output}
