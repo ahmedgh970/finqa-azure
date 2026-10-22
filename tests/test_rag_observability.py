@@ -7,6 +7,7 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from ai103.observability import TracedCredential, stage, tracer_provider
+from ai103.rag.cli import report
 from ai103.rag.generator import Generation, Usage
 from ai103.rag.pipeline import RagPipeline
 from ai103.rag.prompts import Citation, RagAnswer
@@ -88,7 +89,13 @@ def test_run_stops_at_cost_cap_and_logs_errors(tmp_path):
     pipeline = fake_pipeline(cost_tokens=100_000, fail_on="BLOCK")
     questions = [question(1), question(2, "BLOCK me"), question(3), question(4)]
     # 100 000 tokens d'entrée et 100 de sortie : 0,1764 USD par question réussie.
-    summary = run(pipeline, questions, tmp_path, {"index": "x"}, max_cost_usd=0.3)
+    summary = run(
+        lambda question: report(pipeline.answer(question), {"index": "x"}),
+        questions,
+        tmp_path,
+        {"index": "x"},
+        max_cost_usd=0.3,
+    )
     lines = [json.loads(line) for line in (tmp_path / "results.jsonl").read_text().splitlines()]
     assert [record["question_id"] for record in lines] == ["q1", "q2", "q3"]
     assert lines[1]["error"] == "RuntimeError"

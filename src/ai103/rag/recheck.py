@@ -18,10 +18,12 @@ from ai103.retriever.benchmark import atomic_json
 from ai103.retriever.core import Chunk
 
 RECHECKED = "results.rechecked.jsonl"
+KEEP = {"blocked_by_content_filter", "limit_reached", "invalid_output"}
 
 
 def recheck_record(record: dict[str, Any]) -> dict[str, Any]:
-    if "error" in record or record.get("status") == "blocked_by_content_filter":
+    # Blocage, arrêt sur limite ou sortie non conforme : aucune réponse à revérifier.
+    if "error" in record or record.get("status") in KEEP:
         return record
     answer = RagAnswer.model_validate(record["answer"])
     sources = number_sources([Chunk(**source["chunk"]) for source in record["sources"]])

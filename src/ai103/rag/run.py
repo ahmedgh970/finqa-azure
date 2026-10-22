@@ -6,6 +6,7 @@ Seul le texte des questions est envoyé ; réponses et preuves gold ne sont pas 
 import argparse
 import json
 from collections import Counter
+from collections.abc import Callable
 from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,7 +20,6 @@ from ai103.rag.cli import (
     pipeline_settings,
     report,
 )
-from ai103.rag.pipeline import RagPipeline
 from ai103.retriever.benchmark import atomic_json, load_questions
 
 
@@ -51,12 +51,13 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def run(
-    pipeline: RagPipeline,
+    answer_record: Callable[[str], dict[str, Any]],
     questions: list[dict[str, Any]],
     output: Path,
     settings: dict[str, Any],
     max_cost_usd: float,
 ) -> dict[str, Any]:
+    """`answer_record` transforme une question en enregistrement (RAG ou agent)."""
     records: list[dict[str, Any]] = []
     spent = 0.0
     stopped = None
@@ -67,7 +68,7 @@ def run(
                 break
             record: dict[str, Any] = {"question_id": question["financebench_id"]}
             try:
-                record |= report(pipeline.answer(question["question"]), settings)
+                record |= answer_record(question["question"])
                 spent += record["cost_usd"]
             except Exception as exc:
                 # Une erreur (réseau, filtre de contenu…) est journalisée sans arrêter le lot.
@@ -110,7 +111,13 @@ def main() -> None:
     settings = {**pipeline_settings(args), "limit": args.limit}
     with ExitStack() as stack:
         pipeline, credential = build_pipeline(stack, args)
-        summary = run(pipeline, questions, output, settings, args.max_cost_usd)
+        summary = run(
+            lambda question: report(pipeline.answer(question), settings),
+            questions,
+            output,
+            settings,
+            args.max_cost_usd,
+        )
     summary["entra_tokens"] = {"calls": credential.calls, "seconds": credential.seconds}
     atomic_json(output / "summary.json", summary)
     print(json.dumps({k: summary[k] for k in ("status", "cost_usd", "latency_seconds")}, indent=2))

@@ -66,7 +66,7 @@ TOOL_DEFINITIONS = [
         "calculate",
         "Evaluate an arithmetic expression exactly (+, -, *, /, **, parentheses, round, abs, "
         "min, max). Use it for every ratio, growth rate, margin or average.",
-        {"expression": {"type": "string", "description": "For example (8738 + 8866) / 2"}},
+        {"expression": {"type": "string", "description": "For example (120 + 80) / 2"}},
     ),
 ]
 
@@ -156,12 +156,15 @@ class ToolBox:
         embed: Callable[[str], list[float]],
         filings: list[Filing],
         *,
-        mode: Mode = Mode.HYBRID,
+        mode: Mode = Mode.SEMANTIC_HYBRID,
+        pool: int | None = 20,
     ) -> None:
+        """Par défaut, le retrieval de C5 : hybride puis semantic ranker sur 20 candidats."""
         self.retriever = retriever
         self.embed = embed
         self.filings = filings
         self.mode = mode
+        self.pool = pool if mode is Mode.SEMANTIC_HYBRID else None
         self.extractor = FilterExtractor(filing.company for filing in filings)
         self.registry = SourceRegistry()
 
@@ -210,6 +213,7 @@ class ToolBox:
             k=max(1, min(int(k), MAX_RESULTS)),
             vector=self.embed(query) if self.mode is not Mode.LEXICAL else None,
             filter_expression=expression,
+            pool=self.pool,
         )
         passages = []
         for chunk in chunks:

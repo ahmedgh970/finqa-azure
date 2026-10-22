@@ -32,6 +32,20 @@ class AnswerStatus(StrEnum):
     UNSUPPORTED = "unsupported"
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
     BLOCKED_BY_CONTENT_FILTER = "blocked_by_content_filter"
+    # Agent : arrêt sur une limite (appels d'outils, coût, tours) ou réponse finale non conforme.
+    LIMIT_REACHED = "limit_reached"
+    INVALID_OUTPUT = "invalid_output"
+
+
+# Statuts sans réponse exploitable : comptés comme des abstentions dans les comparaisons.
+NO_ANSWER = frozenset(
+    {
+        AnswerStatus.INSUFFICIENT_EVIDENCE,
+        AnswerStatus.BLOCKED_BY_CONTENT_FILTER,
+        AnswerStatus.LIMIT_REACHED,
+        AnswerStatus.INVALID_OUTPUT,
+    }
+)
 
 
 @dataclass(frozen=True)

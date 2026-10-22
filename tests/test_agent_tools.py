@@ -74,7 +74,7 @@ def test_search_builds_filter_and_numbers_sources_once():
     tools, retriever = toolbox()
     first = tools.search_filings("net PP&E", "3M", [2018], 50)
     kwargs = retriever.retrieve.call_args.kwargs
-    assert kwargs["mode"] is Mode.HYBRID and kwargs["k"] == 10
+    assert kwargs["mode"] is Mode.SEMANTIC_HYBRID and kwargs["k"] == 10 and kwargs["pool"] == 20
     assert first["filter"] == ("company eq '3M' and (fiscal_year eq 2018 or fiscal_year eq null)")
     assert [p["source"] for p in first["passages"]] == [1, 2]
     # Le même chunk retrouvé par une autre recherche garde son numéro.

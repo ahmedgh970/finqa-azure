@@ -38,3 +38,11 @@ def test_recheck_upgrades_artifact_quotes_and_keeps_original(tmp_path):
     ]
     assert results_file(tmp_path).name == "results.rechecked.jsonl"
     assert rag_statuses(tmp_path) == {"q1": "verified", "q2": "unsupported"}
+
+
+def test_agent_stop_statuses_are_kept(tmp_path):
+    stopped = record("q1", "Item 8.01 Other Events.", status="limit_reached")
+    stopped["answer"]["insufficient_evidence"] = True
+    (tmp_path / "results.jsonl").write_text(json.dumps(stopped) + "\n")
+    summary = recheck_run(tmp_path)
+    assert summary["after"] == {"limit_reached": 1} and summary["changed"] == []

@@ -14,9 +14,11 @@ from statistics import mean, median
 from typing import Any
 
 from ai103.evaluation.dataset import rag_statuses
+from ai103.rag.guardrails import NO_ANSWER
 from ai103.retriever.benchmark import atomic_json
 
-ABSTAIN = "insufficient_evidence"
+# Abstentions, blocages et arrêts d'agent : aucune réponse exploitable.
+ABSTAIN = frozenset(status.value for status in NO_ANSWER)
 
 
 def _num(value: Any) -> float | None:
@@ -54,8 +56,8 @@ def describe(questions: dict[str, dict[str, Any]], generation: dict[str, Any]) -
     def scores(name: str, subset: list[dict[str, Any]]) -> list[float]:
         return [q[name] for q in subset if q[name] is not None]
 
-    answered = [q for q in questions.values() if q["status"] != ABSTAIN]
-    abstained = [q for q in questions.values() if q["status"] == ABSTAIN]
+    answered = [q for q in questions.values() if q["status"] not in ABSTAIN]
+    abstained = [q for q in questions.values() if q["status"] in ABSTAIN]
     everything = list(questions.values())
     numeric_all = scores("numeric", everything)
     numeric_answered = scores("numeric", answered)
@@ -65,7 +67,7 @@ def describe(questions: dict[str, dict[str, Any]], generation: dict[str, Any]) -
         subset = [q for q in everything if q["type"] == qtype]
         by_type[qtype] = {
             "completeness": _avg(scores("completeness", subset)),
-            "answer_rate": sum(q["status"] != ABSTAIN for q in subset) / len(subset),
+            "answer_rate": sum(q["status"] not in ABSTAIN for q in subset) / len(subset),
         }
     latency = generation.get("latency_seconds", {})
     return {
@@ -128,8 +130,12 @@ def paired(base: dict[str, dict[str, Any]], other: dict[str, dict[str, Any]]) ->
     ]
     gains = sum(other[q]["numeric"] > base[q]["numeric"] for q in numeric)
     losses = sum(other[q]["numeric"] < base[q]["numeric"] for q in numeric)
-    newly_answered = sum(base[q]["status"] == ABSTAIN != other[q]["status"] for q in common)
-    newly_abstained = sum(other[q]["status"] == ABSTAIN != base[q]["status"] for q in common)
+    newly_answered = sum(
+        base[q]["status"] in ABSTAIN and other[q]["status"] not in ABSTAIN for q in common
+    )
+    newly_abstained = sum(
+        other[q]["status"] in ABSTAIN and base[q]["status"] not in ABSTAIN for q in common
+    )
     low, high = bootstrap_mean_diff(diffs) if diffs else (0.0, 0.0)
     return {
         "completeness_mean_diff": mean(diffs) if diffs else None,
@@ -148,7 +154,7 @@ def wrong_answers(questions: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     """Réponses données (non abstenues) mais jugées fausses : chiffre inexact ou complétude ≤ 2."""
     wrong = []
     for qid, q in sorted(questions.items()):
-        if q["status"] == ABSTAIN:
+        if q["status"] in ABSTAIN:
             continue
         if q["numeric"] == 0.0 or (q["completeness"] is not None and q["completeness"] <= 2):
             wrong.append(
@@ -174,7 +180,7 @@ def compare(runs: list[Path]) -> dict[str, Any]:
         qid
         for questions in configs.values()
         for qid, q in questions.items()
-        if q["status"] != ABSTAIN and (q["completeness"] or 0) >= 4
+        if q["status"] not in ABSTAIN and (q["completeness"] or 0) >= 4
     }
     return {
         "baseline": base_name,
