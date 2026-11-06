@@ -3,7 +3,9 @@
 Un système de question-réponse sur 84 rapports financiers (10-K, 10-Q, 8-K, communiqués de
 résultats ; 12 013 pages), construit sur **Azure AI Search**, **Azure OpenAI** et
 **Microsoft Foundry Agent Service**, puis **évalué sur les 150 questions** du jeu
-[FinanceBench](https://github.com/patronus-ai/financebench) open source.
+[FinanceBench](https://github.com/patronus-ai/financebench) open source. L'agent est aussi déployé
+comme chatbot dans Foundry (**hosted agent**), avec mémoire de conversation et traces dans
+Application Insights.
 
 Chaque choix d'architecture a été comparé à l'alternative sur les mêmes questions, avec des tests
 statistiques appariés. Les décisions et leurs preuves sont consignées dans les
@@ -55,6 +57,13 @@ Agent (Foundry Agent Service, prompt agent gpt-5.2)
    list_filings ─┐
    search_filings├─ outils fonction exécutés par l'application, budgets par question
    calculate ────┘   (6 recherches, 12 appels, 10 tours, 0,10 USD)
+
+Agent hébergé (Foundry hosted agent, notre code Python déployé en ZIP, protocole Responses)
+   chatbot : questions générales sans outils, questions sur les rapports avec les mêmes outils,
+             budgets et contrôles ; gpt-5.2 appelé directement (store=False)
+   mémoire : historique de la conversation fourni par la plateforme (previous_response_id) ;
+             une question déjà résolue est reprise sans nouvelle recherche
+   identité d'agent Entra propre : lecture de l'index, inférence sur la ressource Foundry
 ```
 
 **Sécurité et fiabilité** : authentification Microsoft Entra sans clé ; délimiteurs de documents,
@@ -65,7 +74,9 @@ calculatrice sans `eval` ; aucune donnée d'évaluation dans les prompts
 
 **Observabilité** : traces OpenTelemetry selon les conventions sémantiques GenAI (tokens, tokens de
 raisonnement, coût) pour chaque étape, chaque tour d'agent et chaque appel d'outil
-([ADR-0007](adr/0007-observabilite-opentelemetry.md)).
+([ADR-0007](adr/0007-observabilite-opentelemetry.md)). Elles partent dans un fichier local ou dans
+l'Application Insights du projet (`--azure-monitor`, automatique pour l'agent hébergé) ; l'en-tête
+W3C `traceparent` relie les spans de l'application à ceux de Foundry dans une seule trace.
 
 ## Installation
 
@@ -92,7 +103,10 @@ sélectionne la session Azure CLI. Le fichier `.env` reste local et n'est jamais
 | `AZURE_STORAGE_ACCOUNT_URL`, `AZURE_STORAGE_CONTAINER_NAME` | Stockage des PDF |
 
 Rôles nécessaires pour l'identité utilisée : lecture des index Search, inférence sur la ressource
-Foundry, et Foundry User sur le projet pour les agents.
+Foundry, et Foundry User sur le projet pour les agents. Déployer l'agent hébergé demande Foundry
+Project Manager ; son identité d'agent, créée par la plateforme, reçoit ensuite Search Index Data
+Reader sur Search et Cognitive Services OpenAI User sur la ressource Foundry (embeddings).
+L'inférence par l'endpoint du projet lui est accordée implicitement.
 
 ## Utilisation
 
@@ -107,7 +121,15 @@ uv run python scripts/ask.py "What is the FY2018 capital expenditure amount for 
 # Agent : simulation de la définition, création dans Foundry, question
 uv run python scripts/agent.py create
 uv run python scripts/agent.py create --apply
-uv run python scripts/agent.py ask "Does 3M have a healthy quick ratio for Q2 of FY2023?"
+uv run python scripts/agent.py ask "Does 3M have a healthy quick ratio for Q2 of FY2023?" \
+    --azure-monitor
+
+# Agent hébergé : paquet (simulation), déploiement, serveur local, conversation, non-régression
+uv run python scripts/hosted_agent.py deploy
+uv run python scripts/hosted_agent.py deploy --apply
+uv run python scripts/hosted_agent.py serve
+uv run python scripts/hosted_agent.py chat --remote
+uv run python scripts/hosted_agent.py regression --apply
 
 # Campagnes sur les 150 questions, avec plafond de coût, journal et traces
 uv run python scripts/rag_run.py --limit 150 --mode semantic_hybrid --k 10 --pool 20 \
@@ -124,7 +146,8 @@ uv run python scripts/compare_rag_configs.py runs/C5 runs/agent --output runs/co
 uv run python scripts/evaluate_agent.py --run runs/agent
 ```
 
-Les commandes qui écrivent dans Azure sont en simulation par défaut et demandent `--apply`.
+Les commandes qui écrivent dans Azure ou lancent une campagne d'appels sont en simulation par
+défaut et demandent `--apply`.
 Les campagnes s'arrêtent d'elles-mêmes au-delà d'un plafond de coût (`--max-cost-usd`).
 
 Autres outils : benchmark du retrieval (`scripts/evaluate_retrieval.py`), filtres de métadonnées
@@ -150,6 +173,7 @@ ligne des citations (`scripts/recheck_citations.py`), diagnostic de Prompt Shiel
 | `src/ai103/retriever/` | Recherche lexicale, vectorielle, hybride et sémantique ; filtres ; benchmark ; qrels |
 | `src/ai103/rag/` | Contexte, génération Azure OpenAI, garde-fous, pipeline, campagnes |
 | `src/ai103/agent/` | Outils, définition du prompt agent, boucle d'exécution, moniteur |
+| `src/ai103/hosted/` | Agent hébergé : chatbot, serveur Responses, paquet ZIP, déploiement, non-régression |
 | `src/ai103/evaluation/` | Évaluateurs Azure AI Evaluation, contrôle des chiffres, comparaisons |
 | `src/ai103/observability.py` | Traces OpenTelemetry |
 | `adr/` | Décisions d'architecture et leurs preuves |
@@ -174,5 +198,7 @@ uv run mypy src
   part, sans modifier le jeu d'origine.
 - Le garde-fou de déploiement détecte une injection isolée, mais pas une injection noyée dans un
   long contexte : les défenses applicatives restent nécessaires.
-- L'agent fonctionne avec une application qui exécute ses outils : il ne répond pas seul dans le
-  playground du portail.
+- Le prompt agent fonctionne avec une application qui exécute ses outils : il ne répond pas seul
+  dans le playground du portail. L'agent hébergé, lui, embarque ses outils et répond seul.
+- Le paquet de l'agent hébergé épingle tout l'arbre des dépendances testé localement : une
+  dépendance transitive laissée libre a déjà cassé un déploiement.
