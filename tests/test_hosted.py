@@ -472,3 +472,23 @@ def test_server_streams_text_deltas_over_sse(monkeypatch, tmp_path):
     ]
     assert deltas == ["Net PP&E ", "was 8,738 [1].", "\n\n_Statut : …_"]
     assert "response.completed" in body
+
+
+def test_traces_split_search_steps_and_tell_the_answer_basis(spans):
+    runner, _, _ = chat_runner([reply([search_call()]), reply([], FINAL, rid="r2")])
+    runner.answer("What is 3M net PP&E in FY2018?")
+    runner, _, _ = chat_runner([reply([], GENERAL)])
+    runner.answer("What is a quick ratio?")
+    finished = spans.get_finished_spans()
+    by_name = {s.name: s for s in finished}
+    # Embedding et requête Search mesurés séparément, sous le span de l'outil.
+    tool = by_name["execute_tool search_filings"]
+    assert by_name["embeddings"].parent.span_id == tool.context.span_id
+    search = by_name["search_index"]
+    assert search.parent.span_id == tool.context.span_id
+    assert search.attributes["ai103.search.results"] == 1
+    assert search.attributes["ai103.search.mode"] == "semantic_hybrid"
+    # Une réponse générale reste `unsupported` pour le contrôle des citations, mais `general`.
+    roots = [s for s in finished if s.name.startswith("invoke_agent")]
+    assert [r.attributes["ai103.basis"] for r in roots] == ["filings", "general"]
+    assert roots[1].attributes["ai103.status"] == "unsupported"

@@ -247,6 +247,11 @@ class DirectRunner(AgentRunner):
         )
         return response
 
+    def _result_attributes(self, result: AgentResult) -> dict[str, Any]:
+        # `ai103.status` vient du contrôle des citations : `unsupported` pour une réponse sans
+        # citation, même générale ou reprise. `ai103.basis` dit ce sur quoi la réponse s'appuie.
+        return {"ai103.basis": answer_basis(result)}
+
     @staticmethod
     def _stream(client: Any, call: dict[str, Any], on_text: Callable[[str], None]) -> Any:
         """Même appel en streaming : le texte part vers `on_text`, la réponse finale est rendue."""
@@ -277,6 +282,14 @@ def basis(result: AgentResult) -> str:
         return str(json.loads(result.raw_output).get("basis", "general"))
     except (json.JSONDecodeError, AttributeError):
         return "general"
+
+
+def answer_basis(result: AgentResult) -> str:
+    """`filings` dès qu'une recherche a eu lieu, sinon ce que déclare le modèle (reprise ou
+    réponse générale) : pour distinguer ces réponses des vrais échecs dans le monitoring."""
+    if not is_general(result):
+        return "filings"
+    return "conversation" if basis(result) == "conversation" else "general"
 
 
 def _numbers(text: str) -> set[str]:

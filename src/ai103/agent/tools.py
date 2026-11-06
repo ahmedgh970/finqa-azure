@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ai103.observability import tracer
 from ai103.rag.context import Source
 from ai103.retriever.core import Chunk, Mode, Retriever
 from ai103.retriever.filters import FilterExtractor
@@ -207,14 +208,32 @@ class ToolBox:
             # Les rapports sans exercice unique (8-K) restent visibles.
             clauses.append(f"({years} or fiscal_year eq null)")
         expression = " and ".join(clauses) or None
-        chunks = self.retriever.retrieve(
-            query,
-            mode=self.mode,
-            k=max(1, min(int(k), MAX_RESULTS)),
-            vector=self.embed(query) if self.mode is not Mode.LEXICAL else None,
-            filter_expression=expression,
-            pool=self.pool,
-        )
+        # Un span par étape : sépare l'embedding de la requête Search (semantic ranker compris).
+        vector = None
+        if self.mode is not Mode.LEXICAL:
+            with tracer.start_as_current_span(
+                "embeddings", attributes={"gen_ai.operation.name": "embeddings"}
+            ):
+                vector = self.embed(query)
+        size = max(1, min(int(k), MAX_RESULTS))
+        with tracer.start_as_current_span(
+            "search_index",
+            attributes={
+                "ai103.search.mode": self.mode.value,
+                "ai103.search.k": size,
+                "ai103.search.pool": self.pool or 0,
+                "ai103.search.filter": expression or "",
+            },
+        ) as span:
+            chunks = self.retriever.retrieve(
+                query,
+                mode=self.mode,
+                k=size,
+                vector=vector,
+                filter_expression=expression,
+                pool=self.pool,
+            )
+            span.set_attribute("ai103.search.results", len(chunks))
         passages = []
         for chunk in chunks:
             source = self.registry.register(chunk)

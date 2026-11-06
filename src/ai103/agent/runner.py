@@ -151,7 +151,7 @@ class AgentRunner:
                     question, toolbox, calls, usage, rounds, stop_reason, started, response_ids
                 )
                 result.content_filter = exc.body
-                _annotate(root, result)
+                _annotate(root, result, self._result_attributes(result))
                 return result
             finally:
                 self._close(session)
@@ -166,8 +166,12 @@ class AgentRunner:
                 response_ids,
                 raw_output=getattr(response, "output_text", "") or "",
             )
-            _annotate(root, result)
+            _annotate(root, result, self._result_attributes(result))
             return result
+
+    def _result_attributes(self, result: AgentResult) -> dict[str, Any]:
+        """Attributs propres à un mode, ajoutés au span racine (aucun pour le prompt agent)."""
+        return {}
 
     def _open(self, question: str, history: list[dict[str, Any]], root: Span) -> tuple[Any, Any]:
         """Prompt agent : une conversation Foundry porte l'historique des tours de la question."""
@@ -280,7 +284,7 @@ class AgentRunner:
         )
 
 
-def _annotate(span: Span, result: AgentResult) -> None:
+def _annotate(span: Span, result: AgentResult, extra: dict[str, Any] | None = None) -> None:
     """Tokens, coût et statut de la question entière sur le span racine.
 
     Préfixe `ai103.` et non `gen_ai.usage.` : Foundry additionne les `gen_ai.usage.*` de tous les
@@ -298,6 +302,7 @@ def _annotate(span: Span, result: AgentResult) -> None:
             "ai103.stop_reason": result.stop_reason,
             "ai103.rounds": result.rounds,
             "ai103.tool_calls": len(result.tool_calls),
+            **(extra or {}),
         }
     )
 
