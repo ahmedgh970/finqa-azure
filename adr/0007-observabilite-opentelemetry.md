@@ -41,3 +41,21 @@ de Foundry, ou un outil comme Arize Phoenix.
   l'embedding est passé de 1,5 s à 0,7 s en médiane.
 - La latence de génération suit les tokens de sortie : la réponse la plus longue (1 869 tokens)
   a pris 22 s.
+
+## Évolution (2026-11-06)
+
+Le collecteur est branché sans changer l'instrumentation, comme prévu par la décision :
+
+- **Export vers Application Insights** : l'exporteur Azure Monitor s'ajoute à l'exporteur local
+  (`--azure-monitor`), avec la chaîne de connexion lue dans le projet Foundry. L'agent hébergé
+  exporte automatiquement, la plateforme fournissant cette chaîne.
+- **Trace de bout en bout** : l'en-tête W3C `traceparent` est propagé à Foundry. Les spans de
+  l'application et ceux du service (`invoke_agent`, `chat`, `execute_tool`) forment une seule trace.
+- **Spans nommés selon les conventions GenAI** : racine `invoke_agent <agent>`, `chat <modèle>`,
+  `execute_tool <outil>`.
+- **Totaux sous `ai103.usage.*`** sur la racine : Foundry additionne tous les attributs
+  `gen_ai.usage.*` d'une trace, qui comptait donc deux fois les tokens.
+
+Preuves : une question de l'agent suivie du client jusqu'aux appels du modèle dans une seule trace
+(4 tours, 0,022 USD) ; pour l'agent hébergé, le span de la plateforme et la racine de
+l'application partagent la même opération dans Application Insights.

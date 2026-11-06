@@ -11,10 +11,12 @@ from time import perf_counter
 from typing import Any
 
 from openai import BadRequestError, OpenAI
+from opentelemetry.trace import Span
 from pydantic import ValidationError
 
+from ai103.agent.definition import AGENT_NAME
 from ai103.agent.tools import ToolBox
-from ai103.observability import tracer
+from ai103.observability import trace_headers, tracer
 from ai103.rag.generator import Usage, is_content_filter
 from ai103.rag.guardrails import AnswerStatus, CitationCheck, answer_status, check_citations
 from ai103.rag.prompts import RagAnswer
@@ -106,7 +108,8 @@ class AgentRunner:
         self.max_cost_usd = max_cost_usd
         self.max_rounds = max_rounds
 
-    def answer(self, question: str) -> AgentResult:
+    def answer(self, question: str, history: list[dict[str, Any]] | None = None) -> AgentResult:
+        """Répond à une question ; `history` = messages des tours précédents (mode direct)."""
         if not question.strip():
             raise ValueError("Question vide.")
         started = perf_counter()
@@ -115,16 +118,19 @@ class AgentRunner:
         usage = Usage(0, 0, 0, 0)
         response_ids: list[str] = []
         stop_reason, rounds, response = "final_answer", 0, None
-        with tracer.start_as_current_span("agent.answer") as root:
-            conversation = self.client.conversations.create()
+        # Conventions GenAI d'OpenTelemetry : Foundry et Application Insights les reconnaissent.
+        with tracer.start_as_current_span(
+            f"invoke_agent {AGENT_NAME}",
+            attributes={"gen_ai.operation.name": "invoke_agent", "gen_ai.agent.name": AGENT_NAME},
+        ) as root:
+            session, request = self._open(question, history or [], root)
             try:
-                request: Any = question
                 while True:
                     rounds += 1
-                    with tracer.start_as_current_span("agent.round", attributes={"round": rounds}):
-                        response = self.client.responses.create(
-                            input=request, conversation=conversation.id
-                        )
+                    with tracer.start_as_current_span(
+                        "agent.round", attributes={"ai103.round": rounds}
+                    ):
+                        response = self._step(session, request)
                     response_ids.append(response.id)
                     usage = _add_usage(usage, response)
                     pending = [item for item in response.output if item.type == "function_call"]
@@ -145,15 +151,11 @@ class AgentRunner:
                     question, toolbox, calls, usage, rounds, stop_reason, started, response_ids
                 )
                 result.content_filter = exc.body
+                _annotate(root, result)
                 return result
             finally:
-                try:
-                    self.client.conversations.delete(conversation.id)
-                except Exception:  # noqa: BLE001 - nettoyage au mieux, sans masquer le résultat
-                    pass
-            root.set_attribute("ai103.tool_calls", len(calls))
-            root.set_attribute("ai103.cost_usd", usage.cost_usd)
-            return self._finish(
+                self._close(session)
+            result = self._finish(
                 question,
                 toolbox,
                 calls,
@@ -164,6 +166,27 @@ class AgentRunner:
                 response_ids,
                 raw_output=getattr(response, "output_text", "") or "",
             )
+            _annotate(root, result)
+            return result
+
+    def _open(self, question: str, history: list[dict[str, Any]], root: Span) -> tuple[Any, Any]:
+        """Prompt agent : une conversation Foundry porte l'historique des tours de la question."""
+        if history:
+            raise ValueError("L'historique n'est géré qu'en mode direct (DirectRunner).")
+        conversation = self.client.conversations.create()
+        root.set_attribute("gen_ai.conversation.id", conversation.id)
+        return conversation.id, question
+
+    def _step(self, session: Any, request: Any) -> Any:
+        return self.client.responses.create(
+            input=request, conversation=session, extra_headers=trace_headers()
+        )
+
+    def _close(self, session: Any) -> None:
+        try:
+            self.client.conversations.delete(session)
+        except Exception:  # noqa: BLE001 - nettoyage au mieux, sans masquer le résultat
+            pass
 
     def _execute(
         self, toolbox: ToolBox, call: Any, round_: int, calls: list[ToolCall]
@@ -174,8 +197,22 @@ class AgentRunner:
             call.name != "search_filings" or searches < self.max_searches
         )
         started = perf_counter()
-        with tracer.start_as_current_span(f"tool.{call.name}", attributes={"round": round_}):
+        # Arguments et résumé du résultat, sans le texte des passages (volume, confidentialité).
+        with tracer.start_as_current_span(
+            f"execute_tool {call.name}",
+            attributes={
+                "gen_ai.operation.name": "execute_tool",
+                "gen_ai.tool.name": call.name,
+                "gen_ai.tool.type": "function",
+                "gen_ai.tool.call.id": call.call_id,
+                "gen_ai.tool.call.arguments": call.arguments,
+                "ai103.round": round_,
+                "ai103.executed": executed,
+            },
+        ) as span:
             output = toolbox.call(call.name, call.arguments) if executed else BUDGET_MESSAGE
+            summary = _summary(output)
+            span.set_attribute("ai103.result_summary", summary)
         calls.append(
             ToolCall(
                 round_,
@@ -183,7 +220,7 @@ class AgentRunner:
                 call.arguments,
                 perf_counter() - started,
                 executed,
-                _summary(output),
+                summary,
                 [passage["source"] for passage in json.loads(output).get("passages", [])],
             )
         )
@@ -241,6 +278,28 @@ class AgentRunner:
             raw_output=raw_output,
             response_ids=response_ids,
         )
+
+
+def _annotate(span: Span, result: AgentResult) -> None:
+    """Tokens, coût et statut de la question entière sur le span racine.
+
+    Préfixe `ai103.` et non `gen_ai.usage.` : Foundry additionne les `gen_ai.usage.*` de tous les
+    spans d'une trace, et ses propres spans `chat` portent déjà les tokens des tours qu'il trace.
+    """
+    usage = result.usage
+    span.set_attributes(
+        {
+            "ai103.usage.input_tokens": usage.input_tokens,
+            "ai103.usage.cached_input_tokens": usage.cached_input_tokens,
+            "ai103.usage.output_tokens": usage.output_tokens,
+            "ai103.usage.reasoning_tokens": usage.reasoning_tokens,
+            "ai103.cost_usd": usage.cost_usd,
+            "ai103.status": result.status.value,
+            "ai103.stop_reason": result.stop_reason,
+            "ai103.rounds": result.rounds,
+            "ai103.tool_calls": len(result.tool_calls),
+        }
+    )
 
 
 def agent_record(result: AgentResult, settings: dict[str, Any]) -> dict[str, Any]:

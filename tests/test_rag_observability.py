@@ -3,10 +3,14 @@ from unittest.mock import Mock
 
 import pytest
 from azure.core.credentials import AccessToken
-from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from ai103.observability import TracedCredential, stage, tracer_provider
+from ai103.observability import (
+    TracedCredential,
+    add_exporter,
+    application_insights_connection_string,
+    stage,
+)
 from ai103.rag.cli import report
 from ai103.rag.generator import Generation, Usage
 from ai103.rag.pipeline import RagPipeline
@@ -14,38 +18,25 @@ from ai103.rag.prompts import Citation, RagAnswer
 from ai103.rag.run import run, summarize
 from ai103.retriever.core import Chunk
 
-EXPORTER = InMemorySpanExporter()
 
-
-@pytest.fixture(scope="module", autouse=True)
-def provider():
-    # Le fournisseur global ne peut être fixé qu'une fois par processus.
-    trace.set_tracer_provider(tracer_provider(EXPORTER))
-
-
-@pytest.fixture(autouse=True)
-def clear():
-    EXPORTER.clear()
-
-
-def test_stage_records_duration_and_span_attributes():
+def test_stage_records_duration_and_span_attributes(spans):
     timings = {}
     with stage("search", timings, **{"ai103.k": 5}):
         pass
-    (span,) = EXPORTER.get_finished_spans()
+    (span,) = spans.get_finished_spans()
     assert span.name == "search"
     assert span.attributes["ai103.k"] == 5
     assert timings["search_seconds"] >= 0
 
 
-def test_traced_credential_counts_token_requests():
+def test_traced_credential_counts_token_requests(spans):
     inner = Mock()
     inner.get_token.return_value = AccessToken("jwt", 9_999_999_999)
     credential = TracedCredential(inner)
     assert credential.get_token("https://search.azure.com/.default").token == "jwt"
     credential.get_token("https://cognitiveservices.azure.com/.default")
     assert credential.calls == 2
-    assert [s.name for s in EXPORTER.get_finished_spans()] == ["credential.token"] * 2
+    assert [s.name for s in spans.get_finished_spans()] == ["credential.token"] * 2
 
 
 def fake_pipeline(cost_tokens=5000, fail_on=None):
@@ -69,9 +60,9 @@ def fake_pipeline(cost_tokens=5000, fail_on=None):
     return RagPipeline(retriever, lambda q: [0.1] * 1024, generator)
 
 
-def test_pipeline_emits_nested_spans_with_genai_usage():
+def test_pipeline_emits_nested_spans_with_genai_usage(spans):
     fake_pipeline().answer("Capex?")
-    spans = {s.name: s for s in EXPORTER.get_finished_spans()}
+    spans = {s.name: s for s in spans.get_finished_spans()}
     assert set(spans) == {"rag.answer", "filter", "embedding", "search", "generation"}
     root = spans["rag.answer"]
     assert all(spans[n].parent.span_id == root.context.span_id for n in ("search", "generation"))
@@ -113,3 +104,24 @@ def test_summary_latency_percentiles():
     latency = summarize(records)["latency_seconds"]["total_seconds"]
     assert latency["median"] == 2.5
     assert 3.0 < latency["p95"] <= 10.0
+
+
+def test_add_exporter_keeps_existing_provider_and_exports_to_both(spans):
+    second = InMemorySpanExporter()
+    provider, created = add_exporter(second)
+    with stage("search", {}):
+        pass
+    provider.force_flush()
+    assert not created
+    assert [s.name for s in second.get_finished_spans()] == ["search"]
+    assert [s.name for s in spans.get_finished_spans()] == ["search"]
+    second.shutdown()
+
+
+def test_connection_string_prefers_platform_injection(monkeypatch):
+    project = Mock()
+    project.telemetry.get_application_insights_connection_string.return_value = "from-project"
+    monkeypatch.delenv("APPLICATIONINSIGHTS_CONNECTION_STRING", raising=False)
+    assert application_insights_connection_string(project) == "from-project"
+    monkeypatch.setenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "injected")
+    assert application_insights_connection_string(project) == "injected"

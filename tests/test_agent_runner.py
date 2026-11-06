@@ -180,3 +180,20 @@ def test_monitor_snapshot_of_a_running_campaign():
     }
     text = snapshot([record, {"question_id": "q2", "error": "RuntimeError"}])
     assert "erreurs : 1" in text and "appels refusés : 1" in text and "0.03 USD au total" in text
+
+
+def test_spans_follow_genai_conventions_and_propagate_trace_context(spans):
+    agent, client, _ = runner([reply([call()]), reply([], FINAL, rid="resp2")])
+    agent.answer("What is 3M net PP&E in FY2018?")
+    by_name = {s.name: s for s in spans.get_finished_spans()}
+    root = by_name[f"invoke_agent {AGENT_NAME}"]
+    assert root.attributes["gen_ai.conversation.id"] == "conv_1"
+    assert root.attributes["ai103.usage.input_tokens"] == 2000
+    assert root.attributes["ai103.status"] == "verified"
+    tool = by_name["execute_tool search_filings"]
+    assert tool.parent.span_id == root.context.span_id
+    assert tool.attributes["gen_ai.tool.call.id"] == "call_1"
+    assert tool.attributes["ai103.result_summary"].startswith("1 passages")
+    # Le contexte de trace part avec chaque appel au modèle : Foundry peut s'y rattacher.
+    headers = client.responses.create.call_args_list[0].kwargs["extra_headers"]
+    assert headers["traceparent"].split("-")[1] == format(root.context.trace_id, "032x")

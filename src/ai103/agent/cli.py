@@ -20,7 +20,13 @@ from dotenv import load_dotenv
 from ai103.agent.definition import AGENT_NAME, agent_definition
 from ai103.agent.runner import AgentResult, AgentRunner, agent_record
 from ai103.agent.tools import ToolBox, load_filings
-from ai103.observability import TracedCredential, configure_file_tracing
+from ai103.observability import (
+    TracedCredential,
+    add_exporter,
+    application_insights_connection_string,
+    azure_monitor_exporter,
+    configure_file_tracing,
+)
 from ai103.rag.run import run
 from ai103.retriever.benchmark import atomic_json, load_questions
 from ai103.retriever.core import AzureEmbedder, Retriever
@@ -109,6 +115,11 @@ def build_runner(stack: ExitStack, args: argparse.Namespace, env: dict[str, str]
             endpoint=env["FOUNDRY_PROJECT_ENDPOINT"], credential=credential, allow_preview=True
         )
     )
+    if args.azure_monitor:
+        exporter = azure_monitor_exporter(application_insights_connection_string(project))
+        provider, created = add_exporter(exporter)
+        # Envoi des derniers lots avant la fin du programme.
+        stack.callback(provider.shutdown if created else provider.force_flush)
     client = stack.enter_context(project.get_openai_client(agent_name=AGENT_NAME))
     return AgentRunner(
         client,
@@ -142,6 +153,11 @@ def add_runner_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-question-cost", type=float, default=0.10)
     parser.add_argument("--max-rounds", type=int, default=10)
     parser.add_argument("--trace", type=Path, help="Ajouter les spans OpenTelemetry à ce JSONL.")
+    parser.add_argument(
+        "--azure-monitor",
+        action="store_true",
+        help="Envoyer aussi les spans à l'Application Insights connecté au projet Foundry.",
+    )
 
 
 RUNNER_ENV = (

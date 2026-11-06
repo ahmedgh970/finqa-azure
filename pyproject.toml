@@ -20,6 +20,9 @@ dependencies = [
     "openai>=3.24,<4",
     "opentelemetry-sdk>=1.30,<2",
     "azure-ai-evaluation>=1.18,<2",
+    "azure-monitor-opentelemetry-exporter>=1.0.0b40,<2",
+    "azure-ai-agentserver-responses>=2.3.0",
+    "packaging>=24",
 ]
 
 [project.scripts]
