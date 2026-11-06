@@ -61,6 +61,7 @@ Agent (Foundry Agent Service, prompt agent gpt-5.2)
 Agent hébergé (Foundry hosted agent, notre code Python déployé en ZIP, protocole Responses)
    chatbot : questions générales sans outils, questions sur les rapports avec les mêmes outils,
              budgets et contrôles ; gpt-5.2 appelé directement (store=False)
+   streaming : la réponse s'affiche pendant sa génération, sources vérifiées et statut à la fin
    mémoire : historique de la conversation fourni par la plateforme (previous_response_id) ;
              une question déjà résolue est reprise sans nouvelle recherche
    identité d'agent Entra propre : lecture de l'index, inférence sur la ressource Foundry

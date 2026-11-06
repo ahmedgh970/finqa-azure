@@ -7,6 +7,7 @@ nos spans compris. En local, le même serveur écoute sur http://localhost:8088.
 
 import asyncio
 import os
+from collections.abc import AsyncIterator
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -22,8 +23,9 @@ from azure.ai.projects import AIProjectClient
 from azure.identity import DefaultAzureCredential
 from azure.search.documents import SearchClient
 
+from ai103.agent.runner import AgentResult
 from ai103.agent.tools import ToolBox, load_filings
-from ai103.hosted.chat import DirectRunner, history_messages, render
+from ai103.hosted.chat import AnswerStream, DirectRunner, history_messages, render
 from ai103.retriever.core import AzureEmbedder, Retriever
 
 HISTORY_ITEMS = 20  # messages des tours précédents relus à chaque question
@@ -76,6 +78,44 @@ async def respond(question: str, history: list[Any], agent: DirectRunner) -> str
     return render(result, messages)
 
 
+async def stream_answer(
+    question: str, history: list[Any], agent: DirectRunner
+) -> AsyncIterator[str]:
+    """Texte de la réponse au fil de la génération, puis sources vérifiées et statut.
+
+    La boucle tourne dans un thread ; ses morceaux de texte passent par une file asyncio. Le texte
+    total est celui de `respond` : si la réponse finale diffère de ce qui a été montré (arrêt sur
+    une limite, filtre de contenu), elle est ajoutée en entier après un séparateur.
+    """
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+    messages = history_messages(history)
+    extractor = AnswerStream()
+
+    def on_text(delta: str) -> None:
+        if text := extractor.feed(delta):
+            loop.call_soon_threadsafe(queue.put_nowait, text)
+
+    def run() -> AgentResult:
+        # La fin passe par le même canal que le texte, depuis le même thread : elle arrive après
+        # le dernier morceau (posée depuis la boucle, elle pouvait le devancer).
+        try:
+            return agent.answer(question, messages, on_text)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+
+    task = asyncio.create_task(asyncio.to_thread(run))
+    shown = ""
+    while (chunk := await queue.get()) is not None:
+        shown += chunk
+        yield chunk
+    final = render(await task, messages)
+    if final.startswith(shown):
+        yield final[len(shown) :]
+    else:
+        yield f"\n\n---\n\n{final}"
+
+
 def create_app(*, observability: bool = True) -> ResponsesAgentServerHost:
     """`observability=False` : pas de configuration des traces par la bibliothèque (tests)."""
     extra: dict[str, Any] = {} if observability else {"configure_observability": None}
@@ -89,7 +129,8 @@ def create_app(*, observability: bool = True) -> ResponsesAgentServerHost:
     ) -> TextResponse:
         question = await context.get_input_text()
         history = list(await context.get_history())
-        return TextResponse(context, request, text=await respond(question, history, runner()))
+        # Streaming : le client voit la réponse s'écrire ; sans `stream`, le texte est regroupé.
+        return TextResponse(context, request, text=stream_answer(question, history, runner()))
 
     return app
 

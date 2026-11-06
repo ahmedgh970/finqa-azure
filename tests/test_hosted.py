@@ -17,6 +17,7 @@ from ai103.hosted import deploy
 from ai103.hosted.app import respond
 from ai103.hosted.chat import (
     CHAT_INSTRUCTIONS,
+    AnswerStream,
     DirectRunner,
     answered_before,
     history_messages,
@@ -247,6 +248,7 @@ def test_definition_has_no_secret_and_uses_the_smallest_sandbox(monkeypatch):
     document = deploy.definition_document(deploy.environment())
     assert (document["cpu"], document["memory"]) == ("0.5", "1Gi")
     assert document["code_configuration"]["runtime"] == "python_3_13"
+    assert document["session_configuration"] == {"idle_timeout_seconds": 600}
     assert "AZURE_TOKEN_CREDENTIALS" not in document["environment_variables"]
     assert not any(
         word in name for name in document["environment_variables"] for word in ("KEY", "SECRET")
@@ -261,11 +263,13 @@ def test_server_passes_the_conversation_history_on_the_next_turn(monkeypatch, tm
     monkeypatch.setenv("AGENTSERVER_STATE_ROOT", str(tmp_path))
     seen = []
 
-    async def fake_respond(question, history, agent):
+    async def fake_stream(question, history, agent):
         seen.append(history_messages(history))
-        return f"Réponse à : {question}"
+        # Deux morceaux : le client reçoit le texte complet, qu'il streame ou non.
+        yield "Réponse à : "
+        yield question
 
-    monkeypatch.setattr(server, "respond", fake_respond)
+    monkeypatch.setattr(server, "stream_answer", fake_stream)
     monkeypatch.setattr(server, "runner", lambda: None)
     app = server.create_app(observability=False)
 
@@ -328,10 +332,32 @@ def test_failed_or_different_previous_answer_keeps_tools_available():
     assert client.responses.create.call_args.kwargs["tool_choice"] == "auto"
 
 
+class FakeStream:
+    """Flux d'événements Responses, utilisable avec `with … as events`."""
+
+    def __init__(self, *events):
+        self.events = events
+
+    def __enter__(self):
+        return iter(self.events)
+
+    def __exit__(self, *exc):
+        return False
+
+
+def delta(text):
+    return SimpleNamespace(type="response.output_text.delta", delta=text)
+
+
+def completed(response):
+    return SimpleNamespace(type="response.completed", response=response)
+
+
 def test_chat_mode_chains_each_answer_to_the_previous_one(monkeypatch, capsys):
     client = Mock()
     client.responses.create.side_effect = [
-        SimpleNamespace(id=f"resp_{i}", output_text=f"Réponse {i}") for i in range(3)
+        FakeStream(delta("Réponse "), delta(str(i)), completed(SimpleNamespace(id=f"resp_{i}")))
+        for i in range(3)
     ]
     monkeypatch.setattr(deploy, "agent_client", lambda args: client)
     questions = iter(["Bonjour", "Et ensuite ?", "/nouveau", "Autre sujet", ""])
@@ -341,4 +367,108 @@ def test_chat_mode_chains_each_answer_to_the_previous_one(monkeypatch, capsys):
     calls = client.responses.create.call_args_list
     previous = [c.kwargs.get("previous_response_id", "absent") for c in calls]
     assert previous == ["absent", "resp_0", "absent"]
-    assert "Nouvelle conversation" in capsys.readouterr().out
+    assert all(c.kwargs["stream"] is True for c in calls)
+    out = capsys.readouterr().out
+    assert "Nouvelle conversation" in out and "Réponse 1" in out and "premier texte" in out
+
+
+def test_answer_stream_extracts_the_answer_field_whatever_the_split():
+    answer = 'Ligne 1\nCafé "net" 😀 [1]'
+    # ensure_ascii : é et l'emoji deviennent é et une paire 😀, coupables partout.
+    payload = json.dumps({"answer": answer, "citations": [], "insufficient_evidence": False})
+    for size in range(1, len(payload) + 1):
+        stream = AnswerStream()
+        shown = "".join(stream.feed(payload[i : i + size]) for i in range(0, len(payload), size))
+        assert shown == answer, size
+        assert stream.done
+
+
+def streaming_runner(responses):
+    """Le client renvoie un flux d'événements quand `stream=True`, la réponse sinon."""
+    runner, client, sent = chat_runner(responses)
+    plain = client.responses.create.side_effect
+
+    def create(**kwargs):
+        response = plain(**kwargs)
+        if not kwargs.get("stream"):
+            return response
+        text = response.output_text
+        return FakeStream(
+            *(delta(text[i : i + 5]) for i in range(0, len(text), 5)), completed(response)
+        )
+
+    client.responses.create.side_effect = create
+    return runner, client, sent
+
+
+def test_direct_runner_streams_model_text_only_when_asked():
+    runner, client, _ = streaming_runner([reply([search_call()]), reply([], FINAL, rid="r2")])
+    received = []
+    result = runner.answer("What is 3M net PP&E in FY2018?", on_text=received.append)
+    assert "".join(received) == FINAL and result.status.value == "verified"
+    assert all(c.kwargs["stream"] is True for c in client.responses.create.call_args_list)
+    # Sans rappel, aucun streaming : campagnes et évaluations inchangées.
+    runner, client, _ = streaming_runner([reply([], GENERAL)])
+    runner.answer("What is a quick ratio?")
+    assert "stream" not in client.responses.create.call_args.kwargs
+
+
+def test_stream_answer_shows_the_answer_first_then_the_same_text_as_respond():
+    from ai103.hosted import app as server
+
+    async def collect(agent):
+        return [chunk async for chunk in server.stream_answer("Net PP&E of 3M?", [], agent)]
+
+    streaming, _, _ = streaming_runner([reply([search_call()]), reply([], FINAL, rid="r2")])
+    chunks = asyncio.run(collect(streaming))
+    plain, _, _ = chat_runner([reply([search_call()]), reply([], FINAL, rid="r2")])
+    assert "".join(chunks) == asyncio.run(respond("Net PP&E of 3M?", [], plain))
+    # La réponse arrive en plusieurs morceaux, puis sources et statut en un seul, à la fin.
+    assert len(chunks) > 2 and "".join(chunks[:-1]) == "Net PP&E was 8,738 million [1]."
+
+
+def test_stream_answer_appends_the_final_text_when_it_differs_from_what_was_shown(monkeypatch):
+    from ai103.hosted import app as server
+
+    class Agent:
+        def answer(self, question, messages, on_text):
+            on_text('{"answer": "Début')
+            return None
+
+    monkeypatch.setattr(server, "render", lambda result, messages: "Arrêt sur une limite.")
+
+    async def collect():
+        return "".join([c async for c in server.stream_answer("Q ?", [], Agent())])
+
+    assert asyncio.run(collect()) == "Début\n\n---\n\nArrêt sur une limite."
+
+
+def test_server_streams_text_deltas_over_sse(monkeypatch, tmp_path):
+    import httpx
+
+    from ai103.hosted import app as server
+
+    monkeypatch.setenv("AGENTSERVER_STATE_ROOT", str(tmp_path))
+
+    async def fake_stream(question, history, agent):
+        for chunk in ("Net PP&E ", "was 8,738 [1].", "\n\n_Statut : …_"):
+            yield chunk
+
+    monkeypatch.setattr(server, "stream_answer", fake_stream)
+    monkeypatch.setattr(server, "runner", lambda: None)
+    app = server.create_app(observability=False)
+
+    async def call():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://local") as client:
+            response = await client.post("/responses", json={"input": "PP&E ?", "stream": True})
+            return response.text
+
+    body = asyncio.run(call())
+    deltas = [
+        json.loads(line[5:])["delta"]
+        for line in body.splitlines()
+        if line.startswith("data:") and '"response.output_text.delta"' in line
+    ]
+    assert deltas == ["Net PP&E ", "was 8,738 [1].", "\n\n_Statut : …_"]
+    assert "response.completed" in body

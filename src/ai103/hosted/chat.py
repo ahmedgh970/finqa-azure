@@ -9,6 +9,8 @@ La mémoire entre les questions vient de l'historique fourni par la plateforme h
 import json
 import re
 import unicodedata
+from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any
@@ -98,12 +100,76 @@ def answered_before(question: str, history: list[dict[str, Any]]) -> bool:
     return False
 
 
+ANSWER_START = re.compile(r'"answer"\s*:\s*"')
+ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+FINAL_EVENTS = ("response.completed", "response.incomplete", "response.failed")
+
+
+class AnswerStream:
+    """Extrait au fil de l'eau le champ `answer` d'une réponse JSON encore en cours d'écriture.
+
+    Le modèle écrit `{"answer": "…", "citations": […], …}` (`answer` en premier dans le schéma) :
+    seul ce texte est montré pendant la génération ; une séquence d'échappement coupée entre deux
+    morceaux attend le suivant.
+    """
+
+    def __init__(self) -> None:
+        self.buffer = ""
+        self.position: int | None = None
+        self.done = False
+
+    def feed(self, delta: str) -> str:
+        self.buffer += delta
+        if self.done:
+            return ""
+        if self.position is None:
+            match = ANSWER_START.search(self.buffer)
+            if not match:
+                return ""
+            self.position = match.end()
+        text, i = [], self.position
+        while i < len(self.buffer):
+            char = self.buffer[i]
+            if char == '"':
+                self.done = True
+                break
+            if char != "\\":
+                text.append(char)
+                i += 1
+                continue
+            escape = self._escape(i)
+            if escape is None:
+                break
+            decoded, i = escape
+            text.append(decoded)
+        self.position = i
+        return "".join(text)
+
+    def _escape(self, i: int) -> tuple[str, int] | None:
+        """Séquence d'échappement complète à la position `i`, ou None s'il manque la suite."""
+        if i + 1 >= len(self.buffer):
+            return None
+        code = self.buffer[i + 1]
+        if code != "u":
+            return ESCAPES.get(code, code), i + 2
+        # \uXXXX, ou une paire 😀 pour les caractères hors du plan de base.
+        size = 12 if "d800" <= self.buffer[i + 2 : i + 6].lower() <= "dbff" else 6
+        if i + size > len(self.buffer):
+            return None
+        return json.loads(f'"{self.buffer[i : i + size]}"'), i + size
+
+
+# Rappel du texte en cours de génération, propre à chaque question (requêtes concurrentes).
+_ON_TEXT: ContextVar[Callable[[str], None] | None] = ContextVar("on_text", default=None)
+
+
 @dataclass
 class Turn:
-    """Éléments envoyés au modèle pour une question, et outils permis au premier tour."""
+    """Éléments envoyés au modèle pour une question, outils permis et rappel du streaming."""
 
     items: list[dict[str, Any]]
     tool_choice: str = "auto"
+    on_text: Callable[[str], None] | None = None
 
 
 class DirectRunner(AgentRunner):
@@ -116,13 +182,26 @@ class DirectRunner(AgentRunner):
         self.model = model
         self.effort = effort
 
+    def answer(
+        self,
+        question: str,
+        history: list[dict[str, Any]] | None = None,
+        on_text: Callable[[str], None] | None = None,
+    ) -> AgentResult:
+        """`on_text` reçoit le texte du modèle au fil de la génération (streaming)."""
+        token = _ON_TEXT.set(on_text)
+        try:
+            return super().answer(question, history)
+        finally:
+            _ON_TEXT.reset(token)
+
     def _open(self, question: str, history: list[dict[str, Any]], root: Span) -> tuple[Any, Any]:
         # Question déjà résolue : le code interdit les outils, le modèle reprend sa réponse
         # (instructions seules insuffisantes : il relançait la recherche au test du 23 octobre).
         repeated = answered_before(question, history)
         root.set_attributes({"ai103.history_messages": len(history), "ai103.repeat": repeated})
         items = [*history, {"role": "user", "content": question}]
-        return Turn(items, "none" if repeated else "auto"), None
+        return Turn(items, "none" if repeated else "auto", _ON_TEXT.get()), None
 
     def _step(self, session: Any, request: Any) -> Any:
         if request:
@@ -133,20 +212,24 @@ class DirectRunner(AgentRunner):
         ) as span:
             # Paramètres en dictionnaires simples (schémas partagés avec le prompt agent).
             client: Any = self.client
-            response = client.responses.create(
-                model=self.model,
-                instructions=CHAT_INSTRUCTIONS,
-                input=session.items,
-                tools=TOOL_DEFINITIONS,
-                tool_choice=session.tool_choice,
-                text=TEXT_FORMAT,
-                reasoning={"effort": self.effort},
+            call: dict[str, Any] = {
+                "model": self.model,
+                "instructions": CHAT_INSTRUCTIONS,
+                "input": session.items,
+                "tools": TOOL_DEFINITIONS,
+                "tool_choice": session.tool_choice,
+                "text": TEXT_FORMAT,
+                "reasoning": {"effort": self.effort},
                 # Rien n'est conservé côté serveur : le raisonnement chiffré est renvoyé au tour
                 # suivant avec les appels d'outils, comme le ferait une conversation stockée.
-                store=False,
-                include=["reasoning.encrypted_content"],
-                extra_headers=trace_headers(),
-            )
+                "store": False,
+                "include": ["reasoning.encrypted_content"],
+                "extra_headers": trace_headers(),
+            }
+            if session.on_text is None:
+                response = client.responses.create(**call)
+            else:
+                response = self._stream(client, call, session.on_text)
             # Aucun span serveur pour un appel direct au modèle : les tokens sont portés ici.
             if response.usage is not None:
                 usage = Usage.from_response(response.usage)
@@ -163,6 +246,20 @@ class DirectRunner(AgentRunner):
             item.model_dump(mode="json", exclude_none=True) for item in response.output
         )
         return response
+
+    @staticmethod
+    def _stream(client: Any, call: dict[str, Any], on_text: Callable[[str], None]) -> Any:
+        """Même appel en streaming : le texte part vers `on_text`, la réponse finale est rendue."""
+        final = None
+        with client.responses.create(**call, stream=True) as events:
+            for event in events:
+                if event.type == "response.output_text.delta":
+                    on_text(event.delta)
+                elif event.type in FINAL_EVENTS:
+                    final = event.response
+        if final is None:
+            raise RuntimeError("Flux du modèle terminé sans réponse finale.")
+        return final
 
     def _close(self, session: Any) -> None:
         return None

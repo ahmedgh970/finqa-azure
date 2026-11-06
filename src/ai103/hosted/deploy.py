@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
+from ai103.hosted.chat import FINAL_EVENTS
 from ai103.retriever.benchmark import atomic_json
 
 HOSTED_AGENT_NAME = "finance-chat-agent"
@@ -49,6 +50,9 @@ ENVIRONMENT = (
     "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
     "AZURE_SEARCH_SEMANTIC_CONFIGURATION",
 )
+# Veille après 10 min sans requête (décision du 6 novembre) : facturé jusque-là, environ
+# 0,01 USD par session ; évite le démarrage à froid (≈ 10 s) entre deux questions rapprochées.
+IDLE_TIMEOUT = timedelta(minutes=10)
 ENTRY_POINT = "from ai103.hosted.app import main\n\nmain()\n"
 REPORTS = Path("docs/reports/hosted")
 
@@ -119,7 +123,7 @@ def definition_document(env: dict[str, str]) -> dict[str, Any]:
             "dependency_resolution": "remote_build",
         },
         "protocol_versions": [{"protocol": "responses", "version": "2.0.0"}],
-        "session_configuration": {"idle_timeout_seconds": 120},
+        "session_configuration": {"idle_timeout_seconds": int(IDLE_TIMEOUT.total_seconds())},
         "environment_variables": env,
     }
 
@@ -147,7 +151,7 @@ def deploy(args: argparse.Namespace) -> None:
         memory=document["memory"],
         code_configuration=CodeConfiguration(**document["code_configuration"]),
         protocol_versions=[ProtocolVersionRecord(protocol="responses", version="2.0.0")],
-        session_configuration=SessionConfiguration(idle_timeout_seconds=timedelta(seconds=120)),
+        session_configuration=SessionConfiguration(idle_timeout_seconds=IDLE_TIMEOUT),
         environment_variables=env,
     )
     with (
@@ -224,9 +228,20 @@ def send(client: Any, question: str, previous: str | None) -> str:
     started = time.perf_counter()
     # Champ omis au premier tour : Foundry refuse `previous_response_id: null` (HTTP 400).
     chained = {"previous_response_id": previous} if previous else {}
-    response = client.responses.create(model=HOSTED_AGENT_NAME, input=question, **chained)
-    print(response.output_text)
-    print(f"\n[id : {response.id} | {time.perf_counter() - started:.1f} s]")
+    response, first_text = None, None
+    with client.responses.create(
+        model=HOSTED_AGENT_NAME, input=question, stream=True, **chained
+    ) as events:
+        for event in events:
+            if event.type == "response.output_text.delta":
+                first_text = first_text or time.perf_counter() - started
+                print(event.delta, end="", flush=True)
+            elif event.type in FINAL_EVENTS:
+                response = event.response
+    if response is None:
+        raise RuntimeError("Flux de l'agent terminé sans réponse finale.")
+    shown = f"premier texte {first_text:.1f} s | " if first_text else ""
+    print(f"\n\n[id : {response.id} | {shown}total {time.perf_counter() - started:.1f} s]")
     return str(response.id)
 
 
