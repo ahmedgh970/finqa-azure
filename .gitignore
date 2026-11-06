@@ -28,7 +28,7 @@ htmlcov/
 .aws/
 
 # Clone local des labs Microsoft Learn.
-mslearn-ai-studio/
+mslearn-ai-*/
 
 # Rapports de campagnes (exemples du README).
 runs/
